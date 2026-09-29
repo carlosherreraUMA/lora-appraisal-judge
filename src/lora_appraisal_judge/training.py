@@ -67,7 +67,16 @@ def load_quantized_model_and_tokenizer(config: LoraTrainingConfig):
     model = AutoModelForCausalLM.from_pretrained(
         config.base_model,
         quantization_config=bnb_config,
-        device_map="auto",
+        # Explicit single-device placement, not "auto": on a machine with more than
+        # one GPU visible (e.g. Kaggle's "T4 x2" accelerator), `device_map="auto"`'s
+        # sharding combined with `Trainer` wrapping the model in `DataParallel` for
+        # the extra GPU corrupts bitsandbytes' 4-bit quantization state, surfacing as
+        # a CUDA "illegal memory access" during the forward pass. A 1.5B model in
+        # 4-bit fits in one T4's 16 GB with room to spare, so there is no need for
+        # more than one device. Restrict visible GPUs to one at the process level too
+        # (`CUDA_VISIBLE_DEVICES`, set in the notebook before this import) so
+        # `Trainer` never sees a second GPU to wrap around in the first place.
+        device_map={"": 0},
     )
     return model, tokenizer
 
