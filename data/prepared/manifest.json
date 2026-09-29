@@ -1,0 +1,11 @@
+{
+  "attribution": "Derived from nebius/SWE-rebench-openhands-trajectories (Nebius, CC BY 4.0), revision 35455389ab51bf5e2306bfd436ef72d0f98bf882. https://huggingface.co/datasets/nebius/SWE-rebench-openhands-trajectories",
+  "n_raw_scanned": 9000,
+  "n_eligible": 8128,
+  "split_sizes": {
+    "train": 5594,
+    "val": 817,
+    "test": 1717
+  },
+  "n_test_pairs": 106
+}
