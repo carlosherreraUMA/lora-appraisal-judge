@@ -103,20 +103,83 @@ def to_chat_text(tokenizer, prompt: str, response: str | None) -> str:
     messages.append({"role": "assistant", "content": response})
     text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=False
-    )
+    ).rstrip()
     if not text.endswith(tokenizer.eos_token):
         text += tokenizer.eos_token
     return text
 
 
-def build_sft_dataset(tokenizer, examples: list[dict]):
-    """A `datasets.Dataset` of chat-formatted text, one column (`text`), for `trl`'s
-    `SFTTrainer` — which tokenizes and masks the prompt tokens itself given
-    `dataset_text_field="text"` and a response template, set up in the notebook."""
+def tokenize_example(tokenizer, prompt: str, response: str, max_seq_length: int) -> dict:
+    """One (prompt, response) pair as `input_ids` / `attention_mask` / `labels`.
+
+    Loss is masked to the response tokens (`labels = -100` on every prompt token),
+    using plain `transformers` rather than `trl`'s `SFTTrainer` /
+    `DataCollatorForCompletionOnlyLM`: that class was removed by trl 1.14 (checked
+    against the actual installed version on Kaggle, 29 sep 2026 — `trl.__version__ ==
+    "1.14.1"`, no `Collator`/`Completion` name left in `trl` or `trl.trainer`), and
+    trl's SFT API has moved enough times that pinning to one snapshot of it is more
+    fragile than masking labels by hand, which `transformers.Trainer` has supported
+    unchanged for years.
+    """
+    prompt_text = to_chat_text(tokenizer, prompt, None)
+    full_text = to_chat_text(tokenizer, prompt, response)
+
+    prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
+    full_ids = tokenizer(full_text, add_special_tokens=False)["input_ids"]
+
+    n_prompt_tokens = len(prompt_ids)
+    labels = [-100] * n_prompt_tokens + full_ids[n_prompt_tokens:]
+
+    # Truncate from the front, not the back: the label tokens are at the end, and
+    # losing them would silently train the model on nothing.
+    if len(full_ids) > max_seq_length:
+        full_ids = full_ids[-max_seq_length:]
+        labels = labels[-max_seq_length:]
+
+    return {
+        "input_ids": full_ids,
+        "attention_mask": [1] * len(full_ids),
+        "labels": labels,
+    }
+
+
+def build_tokenized_dataset(tokenizer, examples: list[dict], max_seq_length: int):
+    """A `datasets.Dataset` of tokenized, label-masked rows, ready for `Trainer`."""
     from datasets import Dataset
 
-    texts = [to_chat_text(tokenizer, ex["prompt"], ex["response"]) for ex in examples]
-    return Dataset.from_dict({"text": texts})
+    rows = [
+        tokenize_example(tokenizer, ex["prompt"], ex["response"], max_seq_length)
+        for ex in examples
+    ]
+    return Dataset.from_list(rows)
+
+
+class CausalLMLabelCollator:
+    """Pads `input_ids` / `attention_mask` / `labels` to the batch's max length.
+
+    Written out directly, rather than reached for from a library, so there is no
+    ambiguity about which version's padding defaults apply — the same reasoning as
+    dropping the `trl` collator above. `labels` are padded with -100 (ignored by the
+    loss), not with `pad_token_id`, which would otherwise train the model to predict
+    the pad token.
+    """
+
+    def __init__(self, pad_token_id: int):
+        self.pad_token_id = pad_token_id
+
+    def __call__(self, features: list[dict]):
+        import torch
+
+        max_len = max(len(f["input_ids"]) for f in features)
+
+        def pad(seq, value):
+            return list(seq) + [value] * (max_len - len(seq))
+
+        return {
+            "input_ids": torch.tensor([pad(f["input_ids"], self.pad_token_id) for f in features]),
+            "attention_mask": torch.tensor([pad(f["attention_mask"], 0) for f in features]),
+            "labels": torch.tensor([pad(f["labels"], -100) for f in features]),
+        }
 
 
 def sequence_logprob(model, tokenizer, prompt: str, completion: str) -> float:
