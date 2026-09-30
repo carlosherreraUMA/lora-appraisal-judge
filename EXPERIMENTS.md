@@ -31,9 +31,13 @@ result has to clear on the **paired** column, not the aggregate one — see the
 project's `README.md` for why the paired statistic is the one that matters here.
 
 **Caveats.**
-- 106 pairs is a small denominator; a paired-separation figure at this size moves by
-  about ±0.05 for a single pair flipping. Read the qualitative conclusion (collapses
-  towards 0.5), not the third decimal.
+- 106 pairs is a small denominator, and they come from only **63 tasks**. One pair
+  flipping moves the figure by 1/106 ≈ 0.009. The real uncertainty is much wider: a
+  bootstrap over tasks (5,000 resamples, 30 sep 2026) gives a **95% interval of
+  [0.377, 0.604]** for this 0.491. Read the qualitative conclusion (no separation
+  detectable), not the decimals. *Corrected 30 sep 2026: this caveat first said
+  "±0.05 for a single pair flipping", which conflated one pair's weight with the
+  sampling uncertainty.*
 - Only 9,000 of 67,074 raw trajectories were scanned, for speed. Re-running
   `prepare_dataset.py` without `--max-scan` would use the whole corpus; not done for
   this entry.
@@ -104,10 +108,10 @@ negative result about the *pipeline* is still a result.
   notebook is a 9-cell launcher that clones or resets the repo to the latest commit
   and runs the script, rebuilt with an explicit id per cell.
 
-## E2b — LoRA fine-tune, fp16 on T4, `Qwen/Qwen2.5-1.5B-Instruct` — not yet run
+## E2b — LoRA fine-tune, fp16 on T4, `Qwen/Qwen2.5-1.5B-Instruct` (30 sep 2026)
 
-Planned: `notebooks/kaggle_train.ipynb` → `scripts/train_and_evaluate.py`, smoke run
-first.
+Run through `notebooks/kaggle_train.ipynb` → `scripts/train_and_evaluate.py`,
+smoke run first, full run with Kaggle's "Save & Run All" (unattended).
 
 Setup note (30 sep 2026): on Kaggle's image, `get_peft_model` raised `ImportError:
 Found an incompatible version of torchao. Found version 0.10.0, but only versions
@@ -124,12 +128,58 @@ s/example, projected 1,717 examples ≈ 27 min. Logged losses over 20 steps: 0.4
 Against E2a's ~50 s/step this is about 8x faster, consistent with the bf16-on-T4
 diagnosis. It does not isolate it: three things changed at once (bf16 → fp16, no
 4-bit quantization, no gradient checkpointing). Attributing the speedup to one of
-them would need a run changing one at a time, which is not worth the GPU quota here. Fill in after a real run completes with the same four metrics for the `lora`
-row, the smoke report's measured speed, and the honest reading of whether
-`paired_separation` clears 0.491 (E1). Either result gets reported.
+them would need a run changing one at a time, which is not worth the GPU quota here.
+
+**Full run.** Environment as recorded in `results.json`: Tesla T4, fp16, one visible
+GPU, torch 2.10.0+cu128, transformers 5.0.0, peft 0.19.1. Config: LoRA r=16, α=32,
+dropout 0.05 on all seven projection layers; lr 2e-4; 2 epochs; batch 2 ×
+accumulation 8; seed 0. Training: 700 steps in 4,408 s (73 min, 6.3 s/step), mean
+train loss 0.148, first logged loss 0.247 and last 0.134. All 1,717 test generations
+parsed as one of the two labels.
 
 | Model | Accuracy | Balanced accuracy | AUC (overall) | Paired separation (within-task) |
 |---|---|---|---|---|
 | Majority class | 0.493 | 0.500 | 0.500 | 0.500 |
 | Length only | 0.588 | 0.590 | 0.638 | 0.491 |
-| LoRA (Qwen2.5-1.5B-Instruct) | — | — | — | — |
+| **LoRA (Qwen2.5-1.5B-Instruct)** | **0.512** | **0.505** | **0.703** | **0.538** |
+
+AUC and paired separation use the continuous score log P(RESOLVED) − log
+P(UNRESOLVED). Accuracy and balanced accuracy use the greedily generated label.
+
+**Reading.**
+1. **The score ranks, on tasks never seen in training.** AUC 0.703 against 0.638 for
+   the length baseline. The split is by task, so this is not memorised task
+   vocabulary. It is out-of-task.
+2. **The generated label does not.** Balanced accuracy is 0.505, which is chance. A
+   score that ranks while its argmax sits at chance means the model's own decision
+   threshold is badly placed: it favours one label far more often than the base rate
+   warrants. The label distribution in `test_scores.jsonl` has not been checked yet;
+   that is the next thing to look at. Choosing a better threshold would have to be
+   done on the validation split, whose scores were not computed, never on test.
+3. **Within the same task, nothing is established.** 0.538 on 106 pairs from 63
+   tasks. The length baseline's bootstrap interval at this sample size is
+   [0.377, 0.604] (E1), and the LoRA's is presumably similar, so 0.538 cannot be told
+   apart from chance or from the length baseline's 0.491.
+4. **Together:** the drop from 0.703 unpaired to 0.538 paired has the same shape as
+   the length baseline's drop from 0.638 to 0.491. The most economical reading is
+   that the model learned mostly **which tasks are hard**, from what the closing
+   message says about them, rather than **whether a given attempt succeeded**. That
+   is consistent with `situated-appraisal`'s finding that the agent's closing report
+   does not separate its own right and wrong stops. It is a reading, not a
+   demonstration: with 63 tasks the paired test is too weak to rule out a small
+   attempt-level signal.
+
+**Why the paired test is so weak, and the fix.** The prepared data scanned the
+first 9,000 rows of the corpus. There, attempts at the same task are spread thin
+(1.8 per task in the test split, against 10.6 per task in the full corpus), so few
+tasks have both outcomes. No retraining is needed to fix it. The split is a hash of
+`instance_id`, so every attempt, anywhere in the full corpus, at a task in the test
+bucket is a test example by construction, disjoint from training. A test set built
+from all of them, keeping tasks that have both outcomes, would give hundreds of
+tasks instead of 63. That is E3, below, not yet run.
+
+## E3 — saved adapter on a pair-rich test set from the full corpus — not yet run
+
+Planned: evaluate the E2b adapter, unchanged, on a test set rebuilt from the full
+corpus as described above. Report task-clustered bootstrap intervals for AUC and
+paired separation, and the generated-label distribution.
