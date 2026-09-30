@@ -1,6 +1,6 @@
 # lora-appraisal-judge
 
-QLoRA fine-tuning of a small open model to judge a coding agent's own closing
+LoRA fine-tuning of a small open model to judge a coding agent's own closing
 message — built to get real, evaluated LoRA/Hugging Face experience for
 research-engineer applications, and to extend
 [`situated-appraisal-in-coding-agent-trajectories`](https://github.com/carlosherreraUMA/situated-appraisal-in-coding-agent-trajectories)'s
@@ -32,18 +32,20 @@ D24 identifies in the source project, showing up again in a fresh derived task.
 | `src/lora_appraisal_judge/splits.py` | Train/val/test split by task, and within-task pairing. |
 | `src/lora_appraisal_judge/baselines.py` | Majority-class and trajectory-length baselines (scikit-learn, no GPU). |
 | `src/lora_appraisal_judge/metrics.py` | Accuracy, balanced accuracy, AUC, and the within-task paired-separation statistic. |
-| `src/lora_appraisal_judge/training.py` | QLoRA loading, LoRA config, SFT dataset formatting, and continuous scoring — needs `torch`/`transformers`/`peft`/`bitsandbytes` (the `train` extra), so it only runs on a GPU machine. |
+| `src/lora_appraisal_judge/training.py` | LoRA loading (bf16, no quantization — see `EXPERIMENTS.md` E2 for why), dataset tokenization with prompt-masked labels, and continuous scoring — needs `torch`/`transformers`/`peft`/`accelerate` (the `train` extra), so it only runs on a GPU machine. |
 | `scripts/prepare_dataset.py` | Builds `data/prepared/` from a local copy of the raw corpus. |
-| `notebooks/kaggle_train.ipynb` | The actual fine-tuning run: clone this repo, install the training extras, load the model in 4-bit, attach a LoRA adapter, fine-tune, evaluate. Written for a single Kaggle T4. |
+| `notebooks/kaggle_train.ipynb` | The actual fine-tuning run: clone this repo, install the training extras, load the model in bf16, attach a LoRA adapter, fine-tune, evaluate. Written for a single Kaggle T4. |
 | `data/prepared/` | The train/val/test split used by the notebook — committed, small, CC BY 4.0 (see `NOTICE.md`). |
 | `EXPERIMENTS.md` | One entry per run, numbers as they came out, negative results kept. |
 
 ## Why a T4 on Kaggle, and why a 1.5B model
 
 No local GPU. Kaggle Notebooks give a free T4 (16 GB) with a generous weekly quota,
-which fits a small instruct model in 4-bit (QLoRA) comfortably but not a large one —
-said so plainly rather than implied: this is fine-tuning at the scale a single free
-GPU affords, not a claim of experience at production LLM training scale.
+which fits a small instruct model comfortably in plain bf16 (no quantization needed
+at this size — see `EXPERIMENTS.md` E2 for why a first attempt at 4-bit/QLoRA was
+dropped) but not a large one — said so plainly rather than implied: this is
+fine-tuning at the scale a single free GPU affords, not a claim of experience at
+production LLM training scale.
 
 ## Reproducing
 

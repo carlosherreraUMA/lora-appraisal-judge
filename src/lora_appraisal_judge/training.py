@@ -37,28 +37,33 @@ class LoraTrainingConfig:
     lora_dropout: float = 0.05
     learning_rate: float = 2e-4
     num_train_epochs: int = 2
-    per_device_train_batch_size: int = 4
-    gradient_accumulation_steps: int = 4
+    per_device_train_batch_size: int = 2
+    gradient_accumulation_steps: int = 8
     max_seq_length: int = 1024
     seed: int = 0
 
 
-def load_quantized_model_and_tokenizer(config: LoraTrainingConfig):
-    """The base model in 4-bit (QLoRA) plus its tokenizer, ready for `peft`.
+def load_model_and_tokenizer(config: LoraTrainingConfig):
+    """The base model in bf16 (no quantization) plus its tokenizer, ready for `peft`.
 
-    Import of `torch`/`transformers`/`bitsandbytes` is inside this function, not at
-    module level, so importing `lora_appraisal_judge.training` itself does not
-    require a GPU machine — only calling this function does.
+    Not 4-bit / QLoRA, on purpose, after a real run on Kaggle: `bitsandbytes`'s
+    fused 4-bit matmul kernel failed on that T4 (`CUBLAS_STATUS_EXECUTION_FAILED
+    when calling cublasLtMatmul`) and silently fell back to an "unfused" path on
+    every forward pass — invisible after the first occurrence, because Python's
+    default warning filter shows a given `UserWarning` only once, but consistent
+    with training running at ~0.02 it/s (roughly 20-50x slower than a 1.5B model on
+    a T4 should need). A 1.5B model fits in a T4's 16 GB in plain bf16 with room to
+    spare (~3 GB of weights), so 4-bit quantization was buying memory headroom this
+    model size does not need, at the cost of a fragile fused kernel. Simpler and
+    (expected to be) faster.
+
+    Import of `torch`/`transformers` is inside this function, not at module level,
+    so importing `lora_appraisal_judge.training` itself does not require a GPU
+    machine — only calling this function does.
     """
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,
-    )
     tokenizer = AutoTokenizer.from_pretrained(config.base_model)
     if tokenizer.pad_token is None:
         # Qwen2.5's tokenizer ships without a pad token; padding is needed for
@@ -66,26 +71,33 @@ def load_quantized_model_and_tokenizer(config: LoraTrainingConfig):
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(
         config.base_model,
-        quantization_config=bnb_config,
+        dtype=torch.bfloat16,
         # Explicit single-device placement, not "auto": on a machine with more than
-        # one GPU visible (e.g. Kaggle's "T4 x2" accelerator), `device_map="auto"`'s
+        # one GPU visible (e.g. Kaggle's "T4 x2" accelerator), `device_map="auto"`
         # sharding combined with `Trainer` wrapping the model in `DataParallel` for
-        # the extra GPU corrupts bitsandbytes' 4-bit quantization state, surfacing as
-        # a CUDA "illegal memory access" during the forward pass. A 1.5B model in
-        # 4-bit fits in one T4's 16 GB with room to spare, so there is no need for
-        # more than one device. Restrict visible GPUs to one at the process level too
+        # the extra GPU corrupted 4-bit quantization state and crashed with a CUDA
+        # "illegal memory access" — no longer using 4-bit removes that specific
+        # crash mode, but this repo still only asks for one T4, so kept explicit.
+        # Restrict visible GPUs to one at the process level too
         # (`CUDA_VISIBLE_DEVICES`, set in the notebook before this import) so
         # `Trainer` never sees a second GPU to wrap around in the first place.
         device_map={"": 0},
     )
+    model.config.use_cache = False  # incompatible with training; re-enabled for generation later
     return model, tokenizer
 
 
 def build_lora_model(model, config: LoraTrainingConfig):
-    """Wrap `model` with a LoRA adapter, prepared for k-bit training."""
-    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    """Wrap `model` with a LoRA adapter.
 
-    model = prepare_model_for_kbit_training(model)
+    No gradient checkpointing (and so no `prepare_model_for_kbit_training`, which is
+    specific to quantized training anyway): a 1.5B model's activations fit in a T4's
+    16 GB at this batch size without recomputing the forward pass during backward,
+    and checkpointing was a second plausible contributor to the earlier slow run,
+    worth removing along with 4-bit rather than leaving as an unexamined variable.
+    """
+    from peft import LoraConfig, get_peft_model
+
     lora_config = LoraConfig(
         r=config.lora_r,
         lora_alpha=config.lora_alpha,
