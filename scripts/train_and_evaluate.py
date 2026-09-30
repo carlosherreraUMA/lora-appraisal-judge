@@ -82,6 +82,21 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _preflight() -> None:
+    """Fail in seconds, with the fix in the message, on environment problems already
+    met on Kaggle — before a 3 GB model download, not after it."""
+    try:
+        from peft.import_utils import is_torchao_available
+    except ImportError:
+        return  # a peft without torchao dispatch has nothing to check here
+    try:
+        is_torchao_available()
+    except ImportError as exc:
+        sys.exit(f"Environment problem: {exc}\n"
+                 "Fix: `pip uninstall -y torchao` (unused by this project), which "
+                 "scripts/kaggle_setup.sh does.")
+
+
 def _require_smoke_ok(smoke_dir: Path) -> None:
     report_path = smoke_dir / "smoke_report.json"
     if not report_path.exists():
@@ -337,6 +352,7 @@ def main() -> None:
 
     if not torch.cuda.is_available():
         sys.exit("No GPU visible. On Kaggle: Settings -> Accelerator -> GPU T4.")
+    _preflight()
     dtype_name = choose_dtype_name(torch.cuda.get_device_capability(0))
     dtype = getattr(torch, dtype_name)
     env = _environment(dtype_name)

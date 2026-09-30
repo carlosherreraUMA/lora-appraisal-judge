@@ -107,7 +107,14 @@ negative result about the *pipeline* is still a result.
 ## E2b — LoRA fine-tune, fp16 on T4, `Qwen/Qwen2.5-1.5B-Instruct` — not yet run
 
 Planned: `notebooks/kaggle_train.ipynb` → `scripts/train_and_evaluate.py`, smoke run
-first. Fill in after a real run completes with the same four metrics for the `lora`
+first.
+
+Setup note (30 sep 2026): on Kaggle's image, `get_peft_model` raised `ImportError:
+Found an incompatible version of torchao. Found version 0.10.0, but only versions
+above 0.16.0 are supported`. This came from peft's torchao dispatcher, which runs
+even for plain LoRA. `scripts/kaggle_setup.sh` uninstalls torchao, which this project
+does not use. `train_and_evaluate.py` checks for the problem before downloading the
+model. Fill in after a real run completes with the same four metrics for the `lora`
 row, the smoke report's measured speed, and the honest reading of whether
 `paired_separation` clears 0.491 (E1). Either result gets reported.
 
