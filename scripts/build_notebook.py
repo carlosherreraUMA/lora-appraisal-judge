@@ -7,7 +7,6 @@ The previous notebook had no `id` fields (mandatory in nbformat 4.5), so cell ed
 were resolved by position and drifted after an insert, scrambling cell types.
 """
 import json
-
 from pathlib import Path
 
 NB_PATH = Path(__file__).resolve().parent.parent / "notebooks" / "kaggle_train.ipynb"
