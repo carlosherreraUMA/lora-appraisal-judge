@@ -114,7 +114,17 @@ Found an incompatible version of torchao. Found version 0.10.0, but only version
 above 0.16.0 are supported`. This came from peft's torchao dispatcher, which runs
 even for plain LoRA. `scripts/kaggle_setup.sh` uninstalls torchao, which this project
 does not use. `train_and_evaluate.py` checks for the problem before downloading the
-model. Fill in after a real run completes with the same four metrics for the `lora`
+model.
+
+**Smoke run (30 sep 2026, Kaggle Tesla T4, compute 7.5, dtype float16 chosen
+automatically):** 6.1 s/step, projected 700 steps ≈ 71 min; evaluation 0.93
+s/example, projected 1,717 examples ≈ 27 min. Logged losses over 20 steps: 0.434,
+0.199, 0.170, 0.164, all finite, so no fp16 overflow. Verdict: OK.
+
+Against E2a's ~50 s/step this is about 8x faster, consistent with the bf16-on-T4
+diagnosis. It does not isolate it: three things changed at once (bf16 → fp16, no
+4-bit quantization, no gradient checkpointing). Attributing the speedup to one of
+them would need a run changing one at a time, which is not worth the GPU quota here. Fill in after a real run completes with the same four metrics for the `lora`
 row, the smoke report's measured speed, and the honest reading of whether
 `paired_separation` clears 0.491 (E1). Either result gets reported.
 
