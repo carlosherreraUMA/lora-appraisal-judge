@@ -1,6 +1,12 @@
 import math
 
-from lora_appraisal_judge.metrics import accuracy, auc, balanced_accuracy, paired_separation
+from lora_appraisal_judge.metrics import (
+    accuracy,
+    auc,
+    balanced_accuracy,
+    paired_separation,
+    summary,
+)
 
 
 def test_accuracy_counts_none_predictions_as_wrong():
@@ -58,3 +64,23 @@ def test_paired_separation_matches_the_papers_no_separation_reading():
 
 def test_paired_separation_empty_is_nan():
     assert math.isnan(paired_separation([], {}))
+
+
+def test_auc_with_a_nan_score_is_nan_not_a_crash():
+    assert math.isnan(auc([False, True], [0.1, float("nan")]))
+
+
+def test_summary_rows_are_plain_floats_and_consistent():
+    test = [
+        {"trajectory_id": "r1", "resolved": True},
+        {"trajectory_id": "u1", "resolved": False},
+    ]
+    pairs = [(test[0], test[1])]
+    out = summary(test, [True, False], [0.9, 0.1], pairs)
+    assert out == {
+        "accuracy": 1.0,
+        "balanced_accuracy": 1.0,
+        "auc": 1.0,
+        "paired_separation": 1.0,
+    }
+    assert all(type(v) is float for v in out.values())  # JSON-serialisable, no numpy

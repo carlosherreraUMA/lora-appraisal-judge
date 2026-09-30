@@ -45,6 +45,10 @@ def auc(y_true: list[bool], scores: np.ndarray) -> float:
     """
     if len(set(y_true)) < 2:
         return float("nan")
+    if not np.all(np.isfinite(np.asarray(scores, dtype=float))):
+        # A NaN score (fp16 overflow) makes roc_auc_score raise; report the gap
+        # instead of losing every other number in the results at the last step.
+        return float("nan")
     return roc_auc_score(y_true, scores)
 
 
@@ -75,3 +79,24 @@ def paired_separation(
         elif r == u:
             total += 0.5
     return total / len(pairs)
+
+
+def summary(
+    test_examples: list[dict],
+    y_pred: list[bool | None],
+    scores: list[float],
+    pairs: list[tuple[dict, dict]],
+) -> dict[str, float]:
+    """The four reported metrics for one model, as plain floats (JSON-serialisable).
+
+    One function for every row of the results table (majority, length, LoRA), so
+    the rows cannot drift apart by being computed with slightly different code.
+    """
+    y_true = [ex["resolved"] for ex in test_examples]
+    score_by_id = {ex["trajectory_id"]: float(s) for ex, s in zip(test_examples, scores)}
+    return {
+        "accuracy": float(accuracy(y_true, y_pred)),
+        "balanced_accuracy": float(balanced_accuracy(y_true, y_pred)),
+        "auc": float(auc(y_true, list(scores))),
+        "paired_separation": float(paired_separation(pairs, score_by_id)),
+    }

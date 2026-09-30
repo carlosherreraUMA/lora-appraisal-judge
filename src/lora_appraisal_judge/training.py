@@ -1,27 +1,25 @@
-"""QLoRA fine-tuning and scoring helpers — the GPU half of this project.
+"""LoRA fine-tuning and scoring helpers — the GPU half of this project.
 
-Everything in this module needs `torch`, `transformers`, `peft` and `bitsandbytes`
-(the `train` extra in `pyproject.toml`), so it is meant to run on Kaggle
-(`notebooks/kaggle_train.ipynb`), not in the same environment as the rest of the
-package's tests. Kept separate from `extract.py` / `prompts.py` / `baselines.py` /
-`metrics.py` / `splits.py` so those stay importable and testable with no GPU and no
-heavy dependencies at all.
-
-Not unit-tested in this repository for that reason — there is no GPU in CI for it to
-run against. The honest substitute is the notebook itself, whose output (including
-the metrics from `metrics.py`, which *are* tested) is saved and versioned as
-`notebooks/kaggle_train_results.md` after each real run, listed in `EXPERIMENTS.md`.
+The model-facing functions here need `torch`, `transformers` and `peft` (the `train`
+extra in `pyproject.toml`) and only run on a GPU machine, via
+`scripts/train_and_evaluate.py`. Those imports are inside the functions, not at
+module level, so this module imports without them — which is what lets the pure
+helpers at the top (`choose_dtype_name`, `full_run_steps`, `load_scored`) be
+unit-tested on a laptop with no GPU.
 """
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import dataclass
+from pathlib import Path
 
 DEFAULT_BASE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
 #: Attention and MLP projection layers LoRA adapts, in Qwen2's naming. Adapting all
-#: seven rather than only the attention projections costs little extra memory in
-#: 4-bit and is the configuration most fine-tuning guides for this model family
-#: report as a better tradeoff than attention-only.
+#: seven rather than only the attention projections costs little extra memory and
+#: is the configuration most fine-tuning guides for this model family report as a
+#: better tradeoff than attention-only.
 DEFAULT_TARGET_MODULES = (
     "q_proj", "k_proj", "v_proj", "o_proj",
     "gate_proj", "up_proj", "down_proj",
@@ -43,59 +41,99 @@ class LoraTrainingConfig:
     seed: int = 0
 
 
-def load_model_and_tokenizer(config: LoraTrainingConfig):
-    """The base model in bf16 (no quantization) plus its tokenizer, ready for `peft`.
+# --- Pure helpers (no torch needed; unit-tested) -----------------------------------
 
-    Not 4-bit / QLoRA, on purpose, after a real run on Kaggle: `bitsandbytes`'s
-    fused 4-bit matmul kernel failed on that T4 (`CUBLAS_STATUS_EXECUTION_FAILED
-    when calling cublasLtMatmul`) and silently fell back to an "unfused" path on
-    every forward pass — invisible after the first occurrence, because Python's
-    default warning filter shows a given `UserWarning` only once, but consistent
-    with training running at ~0.02 it/s (roughly 20-50x slower than a 1.5B model on
-    a T4 should need). A 1.5B model fits in a T4's 16 GB in plain bf16 with room to
-    spare (~3 GB of weights), so 4-bit quantization was buying memory headroom this
-    model size does not need, at the cost of a fragile fused kernel. Simpler and
-    (expected to be) faster.
 
-    Import of `torch`/`transformers` is inside this function, not at module level,
-    so importing `lora_appraisal_judge.training` itself does not require a GPU
-    machine — only calling this function does.
+def choose_dtype_name(compute_capability: tuple[int, int]) -> str:
+    """"bfloat16" on Ampere (8.x) or newer, "float16" otherwise.
+
+    The reason this function exists: the first real run (EXPERIMENTS.md, E2a) used
+    bf16 on a Kaggle T4. The T4 is Turing, compute capability 7.5, with no native
+    bf16 support. cuBLAS rejected the bf16 matmul (`CUBLAS_STATUS_EXECUTION_FAILED
+    ... abType 14`, and 14 is `CUDA_R_16BF`) and every forward pass fell back to a
+    slow path, about 10x slower than expected. fp16 is what the T4's tensor cores
+    actually run.
+    """
+    major, _minor = compute_capability
+    return "bfloat16" if major >= 8 else "float16"
+
+
+def full_run_steps(n_train: int, config: LoraTrainingConfig) -> int:
+    """Optimizer steps in a full run, as `Trainer` counts them (ceil at each stage).
+
+    Checked against the first real run: 5,594 examples, batch 4, accumulation 4,
+    2 epochs → `Trainer` reported 700 steps; so does this.
+    """
+    micro_batches = math.ceil(n_train / config.per_device_train_batch_size)
+    per_epoch = math.ceil(micro_batches / config.gradient_accumulation_steps)
+    return per_epoch * config.num_train_epochs
+
+
+def load_scored(path: Path) -> dict[str, dict]:
+    """Already-scored test examples from an append-only JSONL file, keyed by id.
+
+    Evaluation writes one line per example as it goes, so an interrupted evaluation
+    resumes where it stopped instead of starting over. A truncated last line (the
+    process died mid-write) is skipped, not fatal.
+    """
+    done: dict[str, dict] = {}
+    if not path.exists():
+        return done
+    with path.open() as fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            done[rec["trajectory_id"]] = rec
+    return done
+
+
+# --- Model-facing functions (need torch/transformers/peft; GPU) --------------------
+
+
+def load_model_and_tokenizer(config: LoraTrainingConfig, dtype_name: str):
+    """The base model in `dtype_name` (no quantization) plus its tokenizer.
+
+    No 4-bit quantization: a 1.5B model is ~3 GB in 16-bit and fits a 16 GB T4 with
+    room to spare. Single-device placement (`device_map={"": 0}`): with two GPUs
+    visible, `Trainer` wraps the model in `DataParallel`, which crashed the first
+    run with a CUDA "illegal memory access". `scripts/train_and_evaluate.py` also
+    sets `CUDA_VISIBLE_DEVICES=0` before torch is imported.
     """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
+    dtype = getattr(torch, dtype_name)
     tokenizer = AutoTokenizer.from_pretrained(config.base_model)
     if tokenizer.pad_token is None:
-        # Qwen2.5's tokenizer ships without a pad token; padding is needed for
-        # batched training. eos as pad is the standard fallback for causal LMs.
+        # eos as pad is the standard fallback for causal LMs without a pad token.
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
-        config.base_model,
-        dtype=torch.bfloat16,
-        # Explicit single-device placement, not "auto": on a machine with more than
-        # one GPU visible (e.g. Kaggle's "T4 x2" accelerator), `device_map="auto"`
-        # sharding combined with `Trainer` wrapping the model in `DataParallel` for
-        # the extra GPU corrupted 4-bit quantization state and crashed with a CUDA
-        # "illegal memory access" — no longer using 4-bit removes that specific
-        # crash mode, but this repo still only asks for one T4, so kept explicit.
-        # Restrict visible GPUs to one at the process level too
-        # (`CUDA_VISIBLE_DEVICES`, set in the notebook before this import) so
-        # `Trainer` never sees a second GPU to wrap around in the first place.
-        device_map={"": 0},
-    )
-    model.config.use_cache = False  # incompatible with training; re-enabled for generation later
+
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            config.base_model, dtype=dtype, device_map={"": 0}
+        )
+    except TypeError:  # transformers < 4.56 names it torch_dtype
+        model = AutoModelForCausalLM.from_pretrained(
+            config.base_model, torch_dtype=dtype, device_map={"": 0}
+        )
+    if model.dtype != dtype:  # an ignored kwarg would silently load fp32
+        model = model.to(dtype)
+    model.config.use_cache = False  # incompatible with training; re-enabled for eval
     return model, tokenizer
 
 
 def build_lora_model(model, config: LoraTrainingConfig):
-    """Wrap `model` with a LoRA adapter.
+    """Wrap `model` with a LoRA adapter whose trainable weights are fp32.
 
-    No gradient checkpointing (and so no `prepare_model_for_kbit_training`, which is
-    specific to quantized training anyway): a 1.5B model's activations fit in a T4's
-    16 GB at this batch size without recomputing the forward pass during backward,
-    and checkpointing was a second plausible contributor to the earlier slow run,
-    worth removing along with 4-bit rather than leaving as an unexamined variable.
+    fp32 adapter weights are required for fp16 mixed-precision training: the
+    gradient scaler refuses to unscale fp16 gradients. The frozen base stays in
+    16-bit. No gradient checkpointing: activations for a 1.5B model at this batch
+    size fit on a T4, and recomputing the forward pass would cost speed for memory
+    that is not short.
     """
+    import torch
     from peft import LoraConfig, get_peft_model
 
     lora_config = LoraConfig(
@@ -106,7 +144,11 @@ def build_lora_model(model, config: LoraTrainingConfig):
         bias="none",
         task_type="CAUSAL_LM",
     )
-    return get_peft_model(model, lora_config)
+    model = get_peft_model(model, lora_config)
+    for param in model.parameters():
+        if param.requires_grad and param.dtype != torch.float32:
+            param.data = param.data.float()
+    return model
 
 
 def to_chat_text(tokenizer, prompt: str, response: str | None) -> str:
@@ -133,14 +175,11 @@ def to_chat_text(tokenizer, prompt: str, response: str | None) -> str:
 def tokenize_example(tokenizer, prompt: str, response: str, max_seq_length: int) -> dict:
     """One (prompt, response) pair as `input_ids` / `attention_mask` / `labels`.
 
-    Loss is masked to the response tokens (`labels = -100` on every prompt token),
-    using plain `transformers` rather than `trl`'s `SFTTrainer` /
-    `DataCollatorForCompletionOnlyLM`: that class was removed by trl 1.14 (checked
-    against the actual installed version on Kaggle, 29 sep 2026 — `trl.__version__ ==
-    "1.14.1"`, no `Collator`/`Completion` name left in `trl` or `trl.trainer`), and
-    trl's SFT API has moved enough times that pinning to one snapshot of it is more
-    fragile than masking labels by hand, which `transformers.Trainer` has supported
-    unchanged for years.
+    Loss is masked to the response tokens (`labels = -100` on every prompt token)
+    by hand, with plain `transformers.Trainer`: `trl`'s
+    `DataCollatorForCompletionOnlyLM` no longer exists in trl 1.14.1 (the version
+    installed on Kaggle, 29 sep 2026), and masking labels directly does not depend
+    on trl's API.
     """
     prompt_text = to_chat_text(tokenizer, prompt, None)
     full_text = to_chat_text(tokenizer, prompt, response)
@@ -178,11 +217,8 @@ def build_tokenized_dataset(tokenizer, examples: list[dict], max_seq_length: int
 class CausalLMLabelCollator:
     """Pads `input_ids` / `attention_mask` / `labels` to the batch's max length.
 
-    Written out directly, rather than reached for from a library, so there is no
-    ambiguity about which version's padding defaults apply — the same reasoning as
-    dropping the `trl` collator above. `labels` are padded with -100 (ignored by the
-    loss), not with `pad_token_id`, which would otherwise train the model to predict
-    the pad token.
+    `labels` are padded with -100 (ignored by the loss), not with `pad_token_id`,
+    which would otherwise train the model to predict the pad token.
     """
 
     def __init__(self, pad_token_id: int):
@@ -204,10 +240,11 @@ class CausalLMLabelCollator:
 
 
 def sequence_logprob(model, tokenizer, prompt: str, completion: str) -> float:
-    """Sum of token log-probabilities of `completion` given `prompt`, under teacher
-    forcing. Used to score RESOLVED vs UNRESOLVED continuously (see module docstring
-    in `metrics.py`: `auc` and `paired_separation` need a score, not just a label),
-    rather than relying on free-generation matching the exact trained wording.
+    """Sum of token log-probabilities of `completion` given `prompt`, teacher-forced.
+
+    Used to score RESOLVED vs UNRESOLVED continuously (`metrics.auc` and
+    `metrics.paired_separation` need a score, not just a label), rather than relying
+    on free generation matching the exact trained wording.
     """
     import torch
 
@@ -235,10 +272,8 @@ def sequence_logprob(model, tokenizer, prompt: str, completion: str) -> float:
 def resolved_score(model, tokenizer, prompt: str) -> float:
     """log P(RESOLVED | prompt) - log P(UNRESOLVED | prompt).
 
-    A continuous score, positive when the model favours RESOLVED, comparable across
-    examples for `metrics.auc` and `metrics.paired_separation` — unlike parsing free
-    generation, this does not depend on the model actually emitting a well-formed
-    one-word answer.
+    Positive when the model favours RESOLVED; comparable across examples, and does
+    not depend on the model emitting a well-formed one-word answer.
     """
     from lora_appraisal_judge.prompts import RESOLVED_LABEL, UNRESOLVED_LABEL
 
