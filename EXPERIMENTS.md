@@ -156,8 +156,7 @@ P(UNRESOLVED). Accuracy and balanced accuracy use the greedily generated label.
 2. **The generated label does not.** Balanced accuracy is 0.505, which is chance. A
    score that ranks while its argmax sits at chance means the model's own decision
    threshold is badly placed: it favours one label far more often than the base rate
-   warrants. The label distribution in `test_scores.jsonl` has not been checked yet;
-   that is the next thing to look at. Choosing a better threshold would have to be
+   warrants. *(E3 checked it: the model answers UNRESOLVED 98.8% of the time.)* Choosing a better threshold would have to be
    done on the validation split, whose scores were not computed, never on test.
 3. **Within the same task, nothing is established.** 0.538 on 106 pairs from 63
    tasks. The length baseline's bootstrap interval at this sample size is
@@ -170,7 +169,8 @@ P(UNRESOLVED). Accuracy and balanced accuracy use the greedily generated label.
    is consistent with `situated-appraisal`'s finding that the agent's closing report
    does not separate its own right and wrong stops. It is a reading, not a
    demonstration: with 63 tasks the paired test is too weak to rule out a small
-   attempt-level signal.
+   attempt-level signal. *(E3 tests it on 319 tasks: still nothing, 0.517
+   [0.478, 0.555].)*
 
 **Why the paired test is so weak, and the fix.** The prepared data scanned the
 first 9,000 rows of the corpus. There, attempts at the same task are spread thin
@@ -179,9 +179,9 @@ tasks have both outcomes. No retraining is needed to fix it. The split is a hash
 `instance_id`, so every attempt, anywhere in the full corpus, at a task in the test
 bucket is a test example by construction, disjoint from training. A test set built
 from all of them, keeping tasks that have both outcomes, would give hundreds of
-tasks instead of 63. That is E3, below, not yet run.
+tasks instead of 63. That is E3, below.
 
-## E3 — saved adapter on a pair-rich test set from the full corpus (in progress)
+## E3 — saved adapter on a pair-rich test set from the full corpus (6 oct 2026)
 
 Evaluate the E2b adapter, unchanged, on a test set rebuilt from the full corpus as
 described above, with task-clustered bootstrap intervals for AUC and paired
@@ -214,7 +214,7 @@ most of length's aggregate AUC (0.635) is task difficulty, since the paired figu
 is much lower. **This raises the bar for the LoRA**: on the paired column it has to
 beat 0.546, not 0.5.
 
-**LoRA on the E3 set: not yet run.** Scoring 12,691 examples one at a time with
+**How the LoRA was scored on the E3 set.** Scoring 12,691 examples one at a time with
 Hugging Face, at E2b's 0.93 s/example, would take about 3.3 hours of T4. E3 uses
 vLLM instead (`src/lora_appraisal_judge/vllm_scoring.py`,
 `scripts/evaluate_vllm.py`, notebook `notebooks/kaggle_e3_vllm.ipynb`): the adapter
@@ -259,3 +259,69 @@ CUDA graphs mainly help decoding, which this workload barely does); keep
 FlashInfer's sampler off. The setup script now compiles and runs one trivial Triton
 kernel, so a linking problem of the same class shows in seconds. Cost of the two
 failed runs: about an hour of the weekly T4 quota.
+
+**Smoke run (6 oct 2026, Kaggle T4, vLLM 0.19.1, Triton attention, eager, LoRA
+applied at inference, the first mode tried).** Engine up in about 14 s; 8.84 GiB
+left for the KV cache. Agreement with E2b's Hugging Face scores on 200 of E2b's own
+test examples: **Spearman 0.9999, largest difference 0.029** in log-odds (fp16
+rounding between two engines), **same generated label in 100%** of them. Verdict
+OK, projected full run about 154 min.
+
+Throughput: **641 ms per example**, against 930 ms with HF one by one in E2b: only
+about 1.5× faster. A rough compute floor explains most of it: each example is three
+requests averaging 1,640 prompt tokens in total, so about 5 TFLOP at 1.5B
+parameters, or 200–340 ms on a T4 at an effective 15–25 TFLOPS, before LoRA. The
+work is almost all prefill, where batching helps little; vLLM's advantages lie in
+decoding, which this barely does. The teacher-forced requests cannot share the
+prompt through prefix caching either, because they ask for log-probabilities at
+every prompt position. At most about 2× is left to gain, so the run goes ahead as
+is.
+
+**Full run (6 oct 2026, same environment as the smoke run, run interactively).**
+The check against E2b on all 1,717 of its test examples passed the Spearman ≥ 0.99
+gate (the script stops otherwise); the exact figures are in that run's
+`results.json` (`agreement_e2b`) and are not copied here yet. E3 set: 12,691
+examples at 621 ms each, 131 min; whole run 2 h 31 min including the agreement
+check. All 12,691 generations parsed as one of the two labels.
+
+Intervals: 95%, 5,000 resamples of whole tasks; 1,318 tasks, 319 with both outcomes,
+6,426 pairs.
+
+| Model | Accuracy | Balanced accuracy | AUC (overall) | Paired separation (within-task) |
+|---|---|---|---|---|
+| Majority class | 0.506 | 0.500 | 0.500 | 0.500 |
+| Length only | 0.594 | 0.592 | 0.635 [0.612, 0.657] | 0.546 [0.509, 0.584] |
+| **LoRA (E2b adapter, unchanged)** | **0.501** | **0.507** | **0.693 [0.667, 0.718]** | **0.517 [0.478, 0.555]** |
+
+Generated label by true outcome:
+
+| True outcome | Generated RESOLVED | Generated UNRESOLVED |
+|---|---|---|
+| Resolved (6,423) | 126 | 6,297 |
+| Unresolved (6,268) | 30 | 6,238 |
+
+**Reading.**
+1. **Across tasks, E2b holds at seven times the sample.** AUC 0.693, with E2b's
+   0.703 inside the interval, against 0.635 for length; the two intervals do not
+   overlap. On tasks never seen in training, the score ranks attempts better than
+   trajectory length does.
+2. **Within a task, there is no attempt-level signal.** Paired separation 0.517,
+   interval [0.478, 0.555], which contains 0.5. Its point estimate is below the
+   length baseline's 0.546; the intervals overlap, so the LoRA is not shown to be
+   worse than length, only not better than chance. E2b's reading, that the model
+   learned **which tasks are hard rather than whether a given attempt succeeded**,
+   was a reading on 63 tasks; on 319 it is the result. This matches
+   `situated-appraisal`'s finding that the agent's closing report does not separate
+   its own right and wrong stops: a fine-tuned 1.5B reader does not find in that
+   text what the agent's explicit claim does not carry either.
+3. **The generated label is almost constant.** UNRESOLVED in 98.8% of cases,
+   whatever the truth: that is why accuracy and balanced accuracy sit at chance
+   (E2b's open point 2). Which part of the bias is the adapter's and which part is
+   the greedy decoding's `repetition_penalty=1.1` (applied in E2b too, and both
+   labels share tokens with the prompt) is not separated here: that needs the share
+   of positive teacher-forced scores, which are unaffected by the penalty, from
+   `e3_scores.jsonl`. Either way the deployable output of this model is its score
+   with a threshold chosen on validation data, not its generated word.
+4. **Scale of the claim.** One base model (1.5B), one adapter, one seed, one agent's
+   trajectories. The paired test now has the power to see a moderate within-task
+   effect and does not; it says nothing about larger models or other agents.
