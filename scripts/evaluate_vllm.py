@@ -29,11 +29,16 @@ import os
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+# FlashInfer's kernels are compiled at run time and that fails on Kaggle (see
+# vllm_scoring.ATTENTION_BACKEND); keep its sampler out too. Greedy decoding would
+# not use it, but this removes the question.
+os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
 import argparse  # noqa: E402
 import gzip  # noqa: E402
 import json  # noqa: E402
 import math  # noqa: E402
+import signal  # noqa: E402
 import subprocess  # noqa: E402
 import sys  # noqa: E402
 import time  # noqa: E402
@@ -57,6 +62,7 @@ from lora_appraisal_judge.training import (  # noqa: E402
     load_scored,
 )
 from lora_appraisal_judge.vllm_scoring import (  # noqa: E402
+    ATTENTION_BACKEND,
     agreement,
     build_request,
     label_distribution,
@@ -65,6 +71,9 @@ from lora_appraisal_judge.vllm_scoring import (  # noqa: E402
 SMOKE_AGREEMENT_EXAMPLES = 200
 SMOKE_TIMING_EXAMPLES = 500
 CHUNK = 1024
+#: Loading a 1.5B model and scoring 700 examples takes minutes; past this, something
+#: is compiling or hanging and the attempt is stopped rather than left to eat quota.
+SMOKE_ATTEMPT_MINUTES = 20
 MAX_PROJECTED_HOURS = 3.0
 #: vLLM must rank E2b's examples as Hugging Face did. Kernels differ, so scores are
 #: not bit-identical in fp16; a rank correlation below this means something other
@@ -118,6 +127,8 @@ def _environment(dtype_name: str, mode: str) -> dict:
         "compute_capability": f"{major}.{minor}",
         "dtype": dtype_name,
         "mode": mode,
+        "attention_backend": ATTENTION_BACKEND,
+        "enforce_eager": True,
         "vllm": vllm.__version__,
         "torch": torch.__version__,
         "transformers": transformers.__version__,
@@ -241,10 +252,26 @@ def _smoke(args) -> None:
         if args.reference_scores:
             cmd += ["--reference-scores", str(args.reference_scores)]
         print(f"\n--- smoke attempt: {mode} ---", flush=True)
-        subprocess.run(cmd, check=False)
         path = args.out / f"smoke_{mode}.json"
-        attempt = (json.loads(path.read_text()) if path.exists()
-                   else {"mode": mode, "problems": [f"{mode} attempt crashed before reporting"]})
+        path.unlink(missing_ok=True)  # a report left by an earlier session is not this one
+        # Own process group: vLLM runs its engine in a child process, which would
+        # keep holding GPU memory if only the direct child were killed.
+        proc = subprocess.Popen(cmd, start_new_session=True)
+        try:
+            proc.wait(timeout=SMOKE_ATTEMPT_MINUTES * 60)
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            timed_out = True
+        if timed_out:
+            attempt = {"mode": mode, "problems": [
+                f"{mode} attempt killed after {SMOKE_ATTEMPT_MINUTES} min "
+                "(the second smoke run spent 26 min compiling kernels before failing)"]}
+        elif path.exists():
+            attempt = json.loads(path.read_text())
+        else:
+            attempt = {"mode": mode, "problems": [f"{mode} attempt crashed before reporting"]}
         attempts.append(attempt)
         if not attempt["problems"]:
             break

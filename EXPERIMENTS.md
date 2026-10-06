@@ -242,3 +242,20 @@ torchvision 0.25.0) match the image, so torch is not replaced at all;
 `scripts/kaggle_setup_vllm.sh` now imports the whole stack, including that
 transformers class, and checks the GPU before anything runs; the smoke report keeps
 the traceback of any failure.
+
+**Setup note (6 oct 2026): second smoke run, no result.** With `vllm==0.19.1` the
+stack installed and imported cleanly, the base model loaded and, in the fallback
+mode, the adapter merged; both attempts then failed in the same place, so not in
+anything LoRA-specific: `/usr/bin/ld: cannot find -lcuda`, while FlashInfer (0.6.6)
+compiled its attention kernels at run time (`flashinfer/jit/cpp_ext.py`, ninja),
+after about **26 minutes of compiling** per attempt. On a T4 vLLM cannot use
+FlashAttention (compute capability 8.0 or later) and picked FlashInfer, which links
+its kernels against `libcuda.so`; the image has the driver's `libcuda.so.1` but no
+`libcuda.so` in the two directories the linker searched. Making the link work would
+still have cost those 26 minutes in every new session. Fix: use vLLM's Triton
+attention backend (`attention_backend="TRITON_ATTN"`, reported as tested on T4) and
+`enforce_eager=True` (no torch.compile or CUDA-graph capture to build at start-up;
+CUDA graphs mainly help decoding, which this workload barely does); keep
+FlashInfer's sampler off. The setup script now compiles and runs one trivial Triton
+kernel, so a linking problem of the same class shows in seconds. Cost of the two
+failed runs: about an hour of the weekly T4 quota.

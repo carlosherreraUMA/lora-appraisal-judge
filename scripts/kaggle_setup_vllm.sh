@@ -37,5 +37,33 @@ import peft  # noqa: F401
 import vllm  # noqa: F401
 from transformers import BloomPreTrainedModel  # noqa: F401
 
-print("environment OK")
+print("imports OK")
 EOF
+
+# The attention kernels (TRITON_ATTN) and the LoRA kernels are Triton kernels,
+# compiled at run time; Triton links its launcher against libcuda. FlashInfer's
+# equivalent step failed on this image after 26 minutes (`ld: cannot find -lcuda`).
+# Compile and run one trivial Triton kernel now, so the same class of failure shows
+# in seconds. Written to a file: @triton.jit reads the function's source, which a
+# script on stdin does not have.
+cat > /tmp/triton_check.py <<'EOF'
+import torch
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def add_one(x_ptr, n, BLOCK: tl.constexpr):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n
+    tl.store(x_ptr + offs, tl.load(x_ptr + offs, mask=mask) + 1, mask=mask)
+
+
+x = torch.zeros(1000, device="cuda", dtype=torch.float16)
+add_one[(triton.cdiv(1000, 256),)](x, 1000, BLOCK=256)
+assert torch.all(x == 1), "Triton kernel ran but gave a wrong result"
+print(f"triton=={triton.__version__} compiles and runs on", torch.cuda.get_device_name(0))
+EOF
+python /tmp/triton_check.py
+
+echo "environment OK"

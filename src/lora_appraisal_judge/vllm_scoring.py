@@ -120,11 +120,23 @@ def label_distribution(examples: list[dict], preds: list[bool | None]) -> dict:
 # --- Model-facing (needs vllm and a GPU) ------------------------------------------
 
 
+#: FlashAttention needs compute capability 8.0, so on a T4 vLLM picks FlashInfer,
+#: which compiles its kernels at run time with nvcc and links against `-lcuda`.
+#: Kaggle's image has the driver's libcuda.so.1 but no libcuda.so where FlashInfer
+#: looks, so the link failed, after 26 minutes of compiling, in both smoke attempts
+#: (EXPERIMENTS.md, E3 setup notes). Triton's attention kernels have been tested on
+#: T4 and Triton finds libcuda through ldconfig.
+ATTENTION_BACKEND = "TRITON_ATTN"
+
+
 def load_llm(model_path: str, dtype_name: str, lora_rank: int | None, max_model_len: int):
     """A vLLM engine for `model_path`, with LoRA enabled when `lora_rank` is given.
 
     `dtype_name` comes from `training.choose_dtype_name`: float16 on a T4, which has
     no native bf16 (EXPERIMENTS.md, E2a), whatever the model's config says.
+    `enforce_eager` skips torch.compile and CUDA-graph capture: less to compile at
+    start-up, and CUDA graphs speed up decoding, which this workload barely does
+    (it reads prompt log-probabilities and generates at most 8 tokens).
     """
     from vllm import LLM
 
@@ -134,6 +146,8 @@ def load_llm(model_path: str, dtype_name: str, lora_rank: int | None, max_model_
         max_model_len=max_model_len,
         gpu_memory_utilization=0.85,
         seed=0,
+        attention_backend=ATTENTION_BACKEND,
+        enforce_eager=True,
     )
     if lora_rank is not None:
         kwargs.update(enable_lora=True, max_lora_rank=lora_rank, max_loras=1)
