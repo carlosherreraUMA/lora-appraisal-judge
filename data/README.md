@@ -12,6 +12,12 @@ needed to run the notebook.
 | `prepared/test.jsonl` | 1,717 | same shape |
 | `prepared/test_pairs.json` | 106 pairs | `[trajectory_id_resolved, trajectory_id_unresolved]` for within-task pairs in the test split |
 | `prepared/manifest.json` | — | provenance: source revision, how many raw records were scanned, split sizes |
+| `e3/test.jsonl.gz` | 12,691 | same shape as `prepared/test.jsonl`: every eligible attempt in the **full** corpus at a task in the test bucket (E3). Pairs are rebuilt from it with `splits.build_pairs` (6,426) |
+| `e3/manifest.json` | — | provenance and the two checks `scripts/prepare_e3.py` runs: no overlap with train/val, all E2b test examples present with identical prompts |
+
+`e3/` was built with `python scripts/prepare_e3.py --raw-path trajectories.parquet`
+(whole corpus, about 25 minutes). Gzip with a fixed timestamp, so a rebuild from the
+same file is byte-identical.
 
 ## Regenerating or extending it
 

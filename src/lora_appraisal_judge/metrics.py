@@ -81,6 +81,72 @@ def paired_separation(
     return total / len(pairs)
 
 
+def task_bootstrap(
+    examples: list[dict],
+    scores: list[float],
+    n_resamples: int = 5000,
+    seed: int = 0,
+    level: float = 0.95,
+) -> dict:
+    """Percentile intervals for AUC and paired separation, resampling whole tasks.
+
+    Attempts at the same task are not independent: they share the issue text and its
+    difficulty. Resampling examples would treat them as independent and give
+    intervals that are too narrow. Here a task is drawn with all its attempts and,
+    for the paired statistic, all its pairs (`splits.build_pairs` semantics: every
+    resolved × unresolved combination, ties at 0.5).
+
+    E1's interval for the length baseline (30 sep 2026) was computed the same way
+    outside the repository; this is the in-repo version.
+    """
+    by_task: dict[str, list[int]] = {}
+    for i, ex in enumerate(examples):
+        by_task.setdefault(ex["instance_id"], []).append(i)
+    tasks = [np.asarray(idx) for idx in by_task.values()]
+    y = np.array([bool(ex["resolved"]) for ex in examples])
+    s = np.asarray(scores, dtype=float)
+
+    # Per task: credited pairs (wins + half the ties) and number of pairs.
+    wins = np.zeros(len(tasks))
+    n_pairs = np.zeros(len(tasks))
+    for t, idx in enumerate(tasks):
+        r = s[idx[y[idx]]]
+        u = s[idx[~y[idx]]]
+        if len(r) and len(u):
+            diff = r[:, None] - u[None, :]
+            wins[t] = (diff > 0).sum() + 0.5 * (diff == 0).sum()
+            n_pairs[t] = diff.size
+
+    rng = np.random.default_rng(seed)
+    aucs = np.empty(n_resamples)
+    paired = np.empty(n_resamples)
+    for b in range(n_resamples):
+        draw = rng.integers(0, len(tasks), size=len(tasks))
+        idx = np.concatenate([tasks[t] for t in draw])
+        aucs[b] = auc(list(y[idx]), s[idx])
+        n = n_pairs[draw].sum()
+        paired[b] = wins[draw].sum() / n if n else np.nan
+
+    alpha = (1.0 - level) / 2.0
+    pairs_total = n_pairs.sum()
+
+    def interval(point: float, draws: np.ndarray) -> dict[str, float]:
+        lo, hi = np.nanquantile(draws, [alpha, 1.0 - alpha])
+        return {"point": float(point), "lo": float(lo), "hi": float(hi)}
+
+    return {
+        "auc": interval(auc(list(y), s), aucs),
+        "paired_separation": interval(
+            wins.sum() / pairs_total if pairs_total else float("nan"), paired
+        ),
+        "n_tasks": len(tasks),
+        "n_tasks_with_pairs": int((n_pairs > 0).sum()),
+        "n_pairs": int(pairs_total),
+        "n_resamples": n_resamples,
+        "level": level,
+    }
+
+
 def summary(
     test_examples: list[dict],
     y_pred: list[bool | None],

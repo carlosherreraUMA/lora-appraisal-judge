@@ -6,7 +6,9 @@ from lora_appraisal_judge.metrics import (
     balanced_accuracy,
     paired_separation,
     summary,
+    task_bootstrap,
 )
+from lora_appraisal_judge.splits import build_pairs
 
 
 def test_accuracy_counts_none_predictions_as_wrong():
@@ -84,3 +86,41 @@ def test_summary_rows_are_plain_floats_and_consistent():
         "paired_separation": 1.0,
     }
     assert all(type(v) is float for v in out.values())  # JSON-serialisable, no numpy
+
+
+def _task_examples():
+    # Three tasks; task C has a single outcome and contributes no pairs.
+    rows = [("a1", "A", True, 0.9), ("a2", "A", False, 0.2), ("a3", "A", False, 0.9),
+            ("b1", "B", True, 0.4), ("b2", "B", False, 0.6),
+            ("c1", "C", True, 0.7)]
+    examples = [{"trajectory_id": t, "instance_id": i, "resolved": r} for t, i, r, _ in rows]
+    return examples, [s for *_, s in rows]
+
+
+def test_task_bootstrap_point_estimates_match_the_plain_functions():
+    examples, scores = _task_examples()
+    out = task_bootstrap(examples, scores, n_resamples=200)
+    by_id = {ex["trajectory_id"]: s for ex, s in zip(examples, scores)}
+    expected_paired = paired_separation(build_pairs(examples), by_id)
+    assert math.isclose(out["paired_separation"]["point"], expected_paired)  # (1 + 0.5 + 0) / 3
+    assert math.isclose(out["auc"]["point"], auc([ex["resolved"] for ex in examples], scores))
+    assert out["n_tasks"] == 3
+    assert out["n_tasks_with_pairs"] == 2
+    assert out["n_pairs"] == 3
+
+
+def test_task_bootstrap_interval_brackets_the_point_and_is_reproducible():
+    examples, scores = _task_examples()
+    a = task_bootstrap(examples, scores, n_resamples=300, seed=1)
+    b = task_bootstrap(examples, scores, n_resamples=300, seed=1)
+    assert a == b
+    for key in ("auc", "paired_separation"):
+        assert a[key]["lo"] <= a[key]["point"] <= a[key]["hi"]
+
+
+def test_task_bootstrap_perfect_separation_has_a_degenerate_interval():
+    examples = [{"trajectory_id": f"{t}{k}", "instance_id": t, "resolved": k == "r"}
+                for t in "ABCD" for k in "ru"]
+    scores = [1.0 if ex["resolved"] else 0.0 for ex in examples]
+    out = task_bootstrap(examples, scores, n_resamples=100)
+    assert out["paired_separation"] == {"point": 1.0, "lo": 1.0, "hi": 1.0}

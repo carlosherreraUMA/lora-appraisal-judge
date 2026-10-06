@@ -17,10 +17,11 @@ that survive a **within-task paired comparison**, which controls for task diffic
 the way the source project's own design (decision D11) does?
 
 The comparison that matters is the *paired* one, not plain accuracy on an unpaired
-test set. `EXPERIMENTS.md` (E1) already shows why: a trajectory-length baseline
-looks informative in the aggregate (AUC 0.638) but that separation collapses to
-chance (0.491) once within-task pairing controls for the fact that harder tasks
-produce both longer trajectories and more failures — the same shape of confound
+test set. `EXPERIMENTS.md` shows why: a trajectory-length baseline looks informative
+in the aggregate (AUC 0.635 on the full-corpus test set), but most of that is task
+difficulty. Once within-task pairing holds the task fixed, it drops to 0.546
+[0.509, 0.584] (E3; E1's 0.491 was the same comparison on only 63 tasks). Harder
+tasks produce both longer trajectories and more failures, the same shape of confound
 D24 identifies in the source project, showing up again in a fresh derived task.
 
 ## What's here
@@ -36,7 +37,12 @@ D24 identifies in the source project, showing up again in a fresh derived task.
 | `scripts/prepare_dataset.py` | Builds `data/prepared/` from a local copy of the raw corpus. |
 | `scripts/train_and_evaluate.py` | The whole GPU run: baselines, LoRA training (checkpointed, resumable), evaluation (resumable), `results.json`. `--smoke` measures speed and projects the full run's time before committing to it. |
 | `notebooks/kaggle_train.ipynb` | A launcher only: clones or resets this repo to the latest commit and runs the script, smoke test first. Nothing in it needs editing when the code changes. |
+| `src/lora_appraisal_judge/vllm_scoring.py` | The same score as `training.resolved_score`, from the same token ids, computed with vLLM in batches; agreement check against saved scores. |
+| `scripts/prepare_e3.py` | Builds `data/e3/`: every attempt in the full corpus at a test-bucket task (E3). |
+| `scripts/evaluate_vllm.py` | E3 on GPU: checks that vLLM reproduces E2b's saved scores, then scores the E3 set (resumable), with baselines and task-clustered bootstrap intervals. Smoke test first; falls back from vLLM's LoRA path to a merged adapter if the former fails on the GPU. |
+| `notebooks/kaggle_e3_vllm.ipynb` | Launcher for E3, same pattern as the training notebook; takes E2b's notebook output as input. |
 | `data/prepared/` | The train/val/test split used by the notebook — committed, small, CC BY 4.0 (see `NOTICE.md`). |
+| `data/e3/` | The full-corpus test set for E3 (12,691 examples, gzipped), CC BY 4.0. |
 | `EXPERIMENTS.md` | One entry per run, numbers as they came out, negative results kept. |
 
 ## Why a T4 on Kaggle, and why a 1.5B model

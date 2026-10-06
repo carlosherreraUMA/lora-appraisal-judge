@@ -1,7 +1,11 @@
-"""Generate notebooks/kaggle_train.ipynb, a thin launcher with an explicit id per cell.
+"""Generate the Kaggle launcher notebooks, with an explicit id per cell.
+
+- notebooks/kaggle_train.ipynb: training and evaluation (E2b).
+- notebooks/kaggle_e3_vllm.ipynb: the E2b adapter scored with vLLM on the
+  full-corpus test set (E3).
 
 Edit this file and re-run it (python scripts/build_notebook.py) to change the
-notebook; do not edit the .ipynb by hand.
+notebooks; do not edit the .ipynb files by hand.
 
 The previous notebook had no `id` fields (mandatory in nbformat 4.5), so cell edits
 were resolved by position and drifted after an insert, scrambling cell types.
@@ -9,7 +13,7 @@ were resolved by position and drifted after an insert, scrambling cell types.
 import json
 from pathlib import Path
 
-NB_PATH = Path(__file__).resolve().parent.parent / "notebooks" / "kaggle_train.ipynb"
+NB_DIR = Path(__file__).resolve().parent.parent / "notebooks"
 
 
 def md(cell_id, src):
@@ -22,7 +26,7 @@ def code(cell_id, src):
             "outputs": [], "source": src.strip("\n").splitlines(keepends=True)}
 
 
-cells = [
+train_cells = [
     md("intro", """
 # lora-appraisal-judge — Kaggle launcher
 
@@ -95,20 +99,84 @@ print(open("/kaggle/working/run/results.json").read())
 """),
 ]
 
-notebook = {
-    "cells": cells,
-    "metadata": {
-        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
-        "language_info": {"name": "python"},
-        "kaggle": {"accelerator": "nvidiaTeslaT4", "isInternetEnabled": True,
-                   "isGpuEnabled": True, "language": "python", "sourceType": "notebook"},
-    },
-    "nbformat": 4,
-    "nbformat_minor": 5,
-}
+clone_cell = next(c for c in train_cells if c["id"] == "clone")
 
-with open(NB_PATH, "w") as fh:
-    json.dump(notebook, fh, indent=1, ensure_ascii=False)
-    fh.write("\n")
+e3_cells = [
+    md("intro", """
+# lora-appraisal-judge — E3 launcher (vLLM)
 
-print(f"wrote {NB_PATH}: {len(cells)} cells")
+Scores the adapter trained in E2b, unchanged, on the test set rebuilt from the full
+corpus (`data/e3/`: 12,691 examples, 319 tasks with both outcomes, 6,426 within-task
+pairs, against 63 tasks and 106 pairs in E2b), with vLLM instead of one-by-one
+Hugging Face generation. All the logic is in
+[`scripts/evaluate_vllm.py`](https://github.com/carlosherreraUMA/lora-appraisal-judge/blob/master/scripts/evaluate_vllm.py).
+
+**Settings (right-hand panel):** Accelerator → **GPU T4** · Internet → **On**.
+
+**Input:** Add Input → Your Work → Notebooks → the **E2b training notebook**, the
+version whose Output has `run/adapter/` and `run/test_scores.jsonl`. The script finds
+both under `/kaggle/input` by itself.
+
+**Order:** steps 0 and 1 interactively, read the smoke verdict, then step 2 (or
+**Save & Run All** for an unattended run; `/kaggle/working` lands in the Output tab).
+"""),
+    clone_cell,
+    code("install", """
+# vLLM pins its own torch, so this replaces the image's torch (a few minutes).
+!bash {REPO_DIR}/scripts/kaggle_setup_vllm.sh
+"""),
+    md("smoke-md", """
+## Step 1 — smoke test (about 10 minutes, mostly loading)
+
+Checks that vLLM reproduces E2b's scores on 200 of E2b's own test examples (if it
+does not, nothing else counts), times 500 E3 examples and projects the full run. It
+tries vLLM's LoRA path first and, if that fails on the T4, the adapter merged into
+the base weights, each in a fresh process. Ends with a **VERDICT**.
+"""),
+    code("smoke", """
+!python -u {REPO_DIR}/scripts/evaluate_vllm.py --smoke --out /kaggle/working/e3-smoke
+"""),
+    md("full-md", """
+## Step 2 — full run
+
+Refuses to start unless the smoke verdict was OK, and uses the mode that passed.
+Agreement with E2b on all 1,717 examples first, then the E3 set; scores are appended
+chunk by chunk, so re-running after an interruption resumes.
+"""),
+    code("full", """
+!python -u {REPO_DIR}/scripts/evaluate_vllm.py --out /kaggle/working/e3 --after-smoke /kaggle/working/e3-smoke
+"""),
+    md("results-md", """
+## Results
+
+`/kaggle/working/e3/results.json`: agreement with E2b, the E3 metrics for majority,
+length and LoRA, the generated-label distribution and task-clustered bootstrap
+intervals. Paste it back to Claude to fill in `EXPERIMENTS.md`.
+"""),
+    code("results", """
+print(open("/kaggle/working/e3/results.json").read())
+"""),
+]
+
+
+def write(name, cells):
+    notebook = {
+        "cells": cells,
+        "metadata": {
+            "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+            "language_info": {"name": "python"},
+            "kaggle": {"accelerator": "nvidiaTeslaT4", "isInternetEnabled": True,
+                       "isGpuEnabled": True, "language": "python", "sourceType": "notebook"},
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    path = NB_DIR / name
+    with open(path, "w") as fh:
+        json.dump(notebook, fh, indent=1, ensure_ascii=False)
+        fh.write("\n")
+    print(f"wrote {path}: {len(cells)} cells")
+
+
+write("kaggle_train.ipynb", train_cells)
+write("kaggle_e3_vllm.ipynb", e3_cells)

@@ -38,6 +38,9 @@ project's `README.md` for why the paired statistic is the one that matters here.
   detectable), not the decimals. *Corrected 30 sep 2026: this caveat first said
   "±0.05 for a single pair flipping", which conflated one pair's weight with the
   sampling uncertainty.*
+- *Added 6 oct 2026:* on the full-corpus test set of E3 (319 paired tasks), the same
+  baseline scores **0.546 [0.509, 0.584]** paired. The "no better than chance"
+  reading above does not hold at that sample size; see E3.
 - Only 9,000 of 67,074 raw trajectories were scanned, for speed. Re-running
   `prepare_dataset.py` without `--max-scan` would use the whole corpus; not done for
   this entry.
@@ -178,8 +181,48 @@ bucket is a test example by construction, disjoint from training. A test set bui
 from all of them, keeping tasks that have both outcomes, would give hundreds of
 tasks instead of 63. That is E3, below, not yet run.
 
-## E3 — saved adapter on a pair-rich test set from the full corpus — not yet run
+## E3 — saved adapter on a pair-rich test set from the full corpus (in progress)
 
-Planned: evaluate the E2b adapter, unchanged, on a test set rebuilt from the full
-corpus as described above. Report task-clustered bootstrap intervals for AUC and
-paired separation, and the generated-label distribution.
+Evaluate the E2b adapter, unchanged, on a test set rebuilt from the full corpus as
+described above, with task-clustered bootstrap intervals for AUC and paired
+separation, and the generated-label distribution.
+
+**Test set (6 oct 2026, `scripts/prepare_e3.py`, no GPU).** All 67,074 raw
+trajectories scanned, 60,739 eligible (the same count `situated-appraisal` reports
+for runs the agent ended itself). Every eligible attempt at a task in the test hash
+bucket: **12,691 examples** (6,423 resolved) from 1,318 tasks, of which **319 have
+both outcomes**, giving **6,426 within-task pairs** (E2b: 106 pairs from 63 tasks).
+Two checks before writing, both passed: no test task occurs in `data/prepared/`'s
+train or val split, and all 1,717 E2b test examples are present with byte-identical
+prompts (same corpus revision, same extraction). Written to `data/e3/`.
+
+**Baselines on the E3 set (6 oct 2026, CPU).** Fit on E2b's train split, as in E1.
+Intervals: 95%, 5,000 resamples of whole tasks (`metrics.task_bootstrap`).
+
+| Model | Accuracy | Balanced accuracy | AUC (overall) | Paired separation (within-task) |
+|---|---|---|---|---|
+| Majority class | 0.506 | 0.500 | 0.500 | 0.500 |
+| Length only | 0.594 | 0.592 | 0.635 [0.612, 0.657] | **0.546 [0.509, 0.584]** |
+
+**Reading, and a correction to E1.** With 319 paired tasks instead of 63, trajectory
+length *does* carry a small within-task signal: 0.546, with an interval that
+excludes 0.5. Within the same task, the resolved attempt tends to be the shorter
+one. E1's 0.491 was a small-sample figure whose own interval ([0.377, 0.604])
+contained this value; E1's reading that the length signal "collapses to chance"
+under pairing was stronger than its data. What survives is the qualitative point:
+most of length's aggregate AUC (0.635) is task difficulty, since the paired figure
+is much lower. **This raises the bar for the LoRA**: on the paired column it has to
+beat 0.546, not 0.5.
+
+**LoRA on the E3 set: not yet run.** Scoring 12,691 examples one at a time with
+Hugging Face, at E2b's 0.93 s/example, would take about 3.3 hours of T4. E3 uses
+vLLM instead (`src/lora_appraisal_judge/vllm_scoring.py`,
+`scripts/evaluate_vllm.py`, notebook `notebooks/kaggle_e3_vllm.ipynb`): the adapter
+is applied at inference time and requests are batched. The score is built from the
+same token ids as `training.resolved_score` (checked on all 12,691 examples with the
+real Qwen tokenizer: the prompt is an exact prefix of both teacher-forced texts, the
+generation prompt matches what `generate_prediction` tokenized, longest sequence 825
+tokens), and greedy generation uses the model's `repetition_penalty=1.1`, which HF
+`generate` applied in E2b even without sampling. Before scoring E3, the script checks
+that vLLM reproduces E2b's own saved scores on E2b's test examples (Spearman ≥ 0.99)
+and stops otherwise.

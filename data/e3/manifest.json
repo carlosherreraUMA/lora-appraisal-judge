@@ -1,0 +1,14 @@
+{
+  "attribution": "Derived from nebius/SWE-rebench-openhands-trajectories (Nebius, CC BY 4.0), revision 35455389ab51bf5e2306bfd436ef72d0f98bf882. https://huggingface.co/datasets/nebius/SWE-rebench-openhands-trajectories",
+  "n_raw_scanned": 67074,
+  "n_eligible": 60739,
+  "n_test": 12691,
+  "n_test_resolved": 6423,
+  "n_test_tasks": 1318,
+  "n_tasks_with_both_outcomes": 319,
+  "n_test_pairs": 6426,
+  "checks": {
+    "test_instances_in_train_or_val": 0,
+    "e2b_test_examples_present_with_identical_prompt": 1717
+  }
+}
