@@ -226,3 +226,19 @@ tokens), and greedy generation uses the model's `repetition_penalty=1.1`, which 
 `generate` applied in E2b even without sampling. Before scoring E3, the script checks
 that vLLM reproduces E2b's own saved scores on E2b's test examples (Spearman ≥ 0.99)
 and stops otherwise.
+
+**Setup note (6 oct 2026): first smoke run, no result.** With `vllm==0.31.0` both
+attempts failed before scoring anything. LoRA path: `RuntimeError: Detected that
+PyTorch and TorchAudio were compiled with different CUDA versions. PyTorch has CUDA
+version 13.0 whereas TorchAudio has CUDA version 12.8`. Merged path:
+`ModuleNotFoundError: Could not import module 'BloomPreTrainedModel'`, from peft's
+import of transformers. Cause of the first: vLLM 0.27–0.31 pin `torch==2.13.0` with
+`torchaudio==2.11.0`, and from PyPI that is a CUDA 13 torch beside a CUDA 12.8
+torchaudio; installing vLLM replaced Kaggle's torch (2.10.0, CUDA 12.8) to get there.
+The second is probably the same mismatch surfacing through transformers' lazy
+imports, but the smoke report kept only the message, so that is not confirmed.
+Fixes: pin `vllm==0.19.1`, the release whose pins (torch 2.10.0, torchaudio 2.10.0,
+torchvision 0.25.0) match the image, so torch is not replaced at all;
+`scripts/kaggle_setup_vllm.sh` now imports the whole stack, including that
+transformers class, and checks the GPU before anything runs; the smoke report keeps
+the traceback of any failure.

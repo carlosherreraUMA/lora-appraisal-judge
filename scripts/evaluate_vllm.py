@@ -37,7 +37,7 @@ import math  # noqa: E402
 import subprocess  # noqa: E402
 import sys  # noqa: E402
 import time  # noqa: E402
-from collections import Counter  # noqa: E402
+import traceback  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
@@ -212,6 +212,8 @@ def _run_smoke_mode(args, mode: str) -> None:
         report["sample_generations"] = [r["generated"] for r in recs[:5]]
     except Exception as exc:  # the point of the smoke run is to catch these
         report["problems"].append(f"{mode} path failed: {type(exc).__name__}: {exc}")
+        # The message alone hid the cause in the first E3 smoke run; keep the trace.
+        report["traceback"] = traceback.format_exc().splitlines()[-25:]
         _write_json(args.out / f"smoke_{mode}.json", report)
         return
 
@@ -256,6 +258,8 @@ def _smoke(args) -> None:
     print("\n=== SMOKE REPORT ===")
     for a in attempts:
         print(f"[{a['mode']}] problems: {a['problems'] or 'none'}")
+        if "traceback" in a:
+            print("  " + "\n  ".join(a["traceback"]))
         if "agreement" in a:
             g = a["agreement"]
             print(f"  agreement with E2b on {g['n']}: Spearman {g['spearman']:.4f}, "

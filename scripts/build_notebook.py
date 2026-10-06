@@ -122,7 +122,10 @@ both under `/kaggle/input` by itself.
 """),
     clone_cell,
     code("install", """
-# vLLM pins its own torch, so this replaces the image's torch (a few minutes).
+# Installs a vLLM whose torch pin matches the image's torch, then checks the stack
+# imports cleanly and sees the GPU; it stops here, in seconds, if not.
+# Re-running after a failed install: stop the session first (pip changes survive a
+# kernel restart, not a new session).
 !bash {REPO_DIR}/scripts/kaggle_setup_vllm.sh
 """),
     md("smoke-md", """
